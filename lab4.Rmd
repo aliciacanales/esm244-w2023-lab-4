@@ -1,0 +1,154 @@
+---
+title: "lab4"
+author: "Alicia Canales"
+date: "2023-02-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(Metrics)
+library(cowplot)
+library(here)
+library(kableExtra)
+```
+
+## Data 
+```{r}
+load(here("data", "fish_data.Rdata"))
+
+```
+
+### Single mdl NLS
+$$
+s_t=B_{t+1}-B_t+C_t
+$$
+
+```{r}
+surplus <- Fish_data %>% 
+  group_by(stockid) %>% 
+  select(stockid, year, TBbest, TCbest) %>% 
+  drop_na() %>% 
+  mutate(f_biomass = lead(TBbest)) %>% 
+  mutate(surplus = f_biomass-TBbest+TCbest) %>% 
+  drop_na()
+```
+
+```{r}
+one_stock <- surplus %>% 
+  filter(stockid == "COD1f-XIV")
+
+ggplot(data = one_stock, aes(x = year, y = surplus)) + geom_point(size = 3, color = 'black') + theme_minimal()
+```
+
+
+## Step one: select a model 
+
+$$
+\hat{s_t}=-e*MSY(\frac{B_t}{K}\ln(\frac{B_T}{K}))
+$$
+
+```{r}
+fox <- function(m, carry, biomass){
+  out=-2.718*m*(biomass/carry)* log(biomass/carry)
+  
+  return(out)
+}
+```
+
+
+## Step Two : Initial Guess
+
+```{r}
+guess_vec = c(max(one_stock$TBbest) *0.37,
+              max(one_stock$TBbest))
+```
+
+### Step three: run NLS
+
+```{r}
+one_stock_nls = nls(surplus~fox(m, carry, TBbest), # tell it what function to use
+                   data = one_stock)
+            
+start <- list(m=guess_vec[1], carry = guess_vec[2], trace = TRUE)
+```
+
+```{r}
+one_stock_predict <- one_stock %>% 
+  mutate(predict = predict(one_stock_nls, newdata=.))
+
+ggplot(data = one_stock_predict) +
+  geom_point(aes(x = year, y= surplus)) +
+  geom_point(aes(x = year, y = predict), color = 'red')
+```
+
+
+```{r}
+control_nls = nls(surplus~fox(m, carry, TBbest), # tell it what function to use
+                   data = one_stock,
+                  start = list(m = guess_vec[1], carry = guess_vec[2]), 
+                               trace = TRUE,
+                  control = nls.control(tol = 2.1e-9))
+```
+
+
+## Using Purrrr to run many models
+
+
+```{r}
+all_nls_fcn <- function(surplus_df){
+  nls(surplus~fox(m,carry,TBbest),
+      data = surplus_df,
+      start = list(m = max(surplus_df$TBbest)*0.37, carry = max(surplus_df$TBbest))
+      )
+}
+
+
+all_nls_fcn(one_stock)
+```
+
+```{r}
+fox_all<-surplus %>%
+  group_by(stockid) %>% 
+  nest() %>% 
+  mutate(nls_model=map(data,~all_nls_fcn(.x))) %>% 
+  mutate(predictions=map2(nls_model,data,~predict(.x,newdata=.y))) %>% 
+  mutate(RMSE=map2_dbl(predictions,data,~rmse(.x,.y$surplus)))
+```
+
+
+```{r}
+plots <- fox_all %>% 
+  arrange(RMSE) %>% 
+  head(5) %>% 
+  mutate(graph = map2(data, predictions,
+                      ~ggplot()+
+                        geom_point(data = .x,
+                                   aes(x=.x$year, y = .x$surplus, color = 'Actual'))+
+                        geom_point(aes(x=.x$year, y = .y, color = 'Predicted'))+
+                        theme_minimal()+
+                        xlab('')+
+                        ylab('Surplus')+
+                        scale_color_manual(name = 'Legend', breaks = c('Actual', 'Predicted'), values = c('Actual'= 'black', 'Predicted' = 'red'))))
+
+plot_list = plots$graph
+
+cowplot::plot_grid(plotlist = plot_list, labels = c(plots$stockid,""), hjust = -0.5, vjust = 1)
+```
+
+```{r}
+
+legend = get_legend(plots$graph[[1]])
+for(i in 1:length(plots$graph)){
+  plots$graph[[i]] <- plots$graph[[i]] + theme(legend.position = "none")
+}
+
+plot_legend <-plots$graph
+plot_legend[[6]] <- legend
+
+cowplot::plot_grid(plotlist = plot_legend, labels = c(plots$stockid, ""), hjust = -0.5, vjust = 1)
+```
+
+
+
